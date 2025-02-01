@@ -1630,7 +1630,8 @@ binding_action(ExchangeName, TopicFilter, QName, BindingArgs,
 
 publish_to_queues(
   #mqtt_msg{topic = Topic,
-            packet_id = PacketId} = MqttMsg,
+            packet_id = PacketId,
+            payload = Payload} = MqttMsg,
   #state{cfg = #cfg{exchange = ExchangeName = #resource{name = ExchangeNameBin},
                     delivery_flow = Flow,
                     conn_name = ConnName,
@@ -1638,19 +1639,27 @@ publish_to_queues(
          auth_state = #auth_state{user = #user{username = Username}}} = State) ->
     Anns = #{?ANN_EXCHANGE => ExchangeNameBin,
              ?ANN_ROUTING_KEYS => [mqtt_to_amqp(Topic)]},
-    Msg0 = mc:init(mc_mqtt, MqttMsg, Anns, mc_env()),
-    Msg = rabbit_message_interceptor:intercept(Msg0),
-    case rabbit_exchange:lookup(ExchangeName) of
-        {ok, Exchange} ->
-            QNames0 = rabbit_exchange:route(Exchange, Msg, #{return_binding_keys => true}),
-            QNames = drop_local(QNames0, State),
-            rabbit_trace:tap_in(Msg, QNames, ConnName, Username, TraceState),
-            Opts = maps_put_truthy(flow, Flow, maps_put_truthy(correlation, PacketId, #{})),
-            deliver_to_queues(Msg, Opts, QNames, State);
-        {error, not_found} ->
-            ?LOG_ERROR("~s not found", [rabbit_misc:rs(ExchangeName)]),
-            {error, exchange_not_found, State}
-    end.
+             Ans = rabbit_custom_interceptor:intercept(Payload),
+             if 
+                 Ans == false ->
+                     rabbit_log:error("User: ~p, Topic: ~p :: Message cannot publish due to incorrect format. Message: ~p",[Username,Topic,Payload]),
+                     {error, "Payload not in correct format", State}; 
+                    true ->
+                        Msg0 = mc:init(mc_mqtt, MqttMsg, Anns, mc_env()),
+                        Msg = rabbit_message_interceptor:intercept(Msg0),
+                        case rabbit_exchange:lookup(ExchangeName) of
+                            {ok, Exchange} ->
+                                QNames0 = rabbit_exchange:route(Exchange, Msg, #{return_binding_keys => true}),
+                                QNames = drop_local(QNames0, State),
+                                rabbit_trace:tap_in(Msg, QNames, ConnName, Username, TraceState),
+                                Opts = maps_put_truthy(flow, Flow, maps_put_truthy(correlation, PacketId, #{})),
+                                deliver_to_queues(Msg, Opts, QNames, State);
+                            {error, not_found} ->
+                                ?LOG_ERROR("~s not found", [rabbit_misc:rs(ExchangeName)]),
+                                {error, exchange_not_found, State}
+                        end
+                    end.
+   
 
 %% "Bit 2 of the Subscription Options represents the No Local option.
 %% If the value is 1, Application Messages MUST NOT be forwarded to a connection with a ClientID
